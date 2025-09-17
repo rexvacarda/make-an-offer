@@ -2,7 +2,7 @@
   "name": "offer-service",
   "version": "1.0.0",
   "private": true,
-  "scripts": { "start": "node src/server.js", "dev": "nodemon src/server.js" },
+  "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18" },
   "dependencies": {
     "cors": "^2.8.5",
@@ -12,6 +12,5 @@
     "helmet": "^7.1.0",
     "nodemailer": "^6.9.11",
     "sqlite3": "^5.1.7"
-  },
-  "devDependencies": { "nodemon": "^3.1.0" }
+  }
 }
