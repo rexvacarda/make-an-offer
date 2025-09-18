@@ -168,10 +168,40 @@ app.get("/admin/offers/:id/status", (req, res) => {
   const id = Number(req.params.id || 0);
   const val = String(req.query.value || "open");
   if (!["open","accepted","declined","expired"].includes(val)) return res.status(400).send("Bad status");
-  db.run("UPDATE offers SET status=? WHERE id=?", [val, id], err =>
-    err ? res.status(500).send("DB error")
-        : res.redirect(`/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}`)
-  );
+
+  db.run("UPDATE offers SET status=? WHERE id=?", [val, id], (err) => {
+    if (err) return res.status(500).send("DB error");
+
+    // Send email to customer on accept/decline (if SMTP configured)
+    if (mailer && (val === "accepted" || val === "declined")) {
+      db.get("SELECT * FROM offers WHERE id=?", [id], (e, row) => {
+        if (!e && row && row.email) {
+          const fmt = n => (n/100).toFixed(2);
+          const subject =
+            val === "accepted"
+              ? `Your offer was accepted – ${row.product_title}`
+              : `Your offer was declined – ${row.product_title}`;
+          const html =
+            val === "accepted"
+              ? `<p>Great news — we’ve accepted your offer of <b>${row.currency} ${fmt(row.offer_cents)}</b> for <b>${row.product_title}</b> (${row.variant_title}).</p>
+                 <p>Please reply to this email to complete the purchase, or proceed on the product page.</p>`
+              : `<p>Thanks for your offer on <b>${row.product_title}</b> (${row.variant_title}). We can’t accept <b>${row.currency} ${fmt(row.offer_cents)}</b> right now.</p>
+                 <p>If you’d like to revise your offer, feel free to reply.</p>`;
+
+          mailer.sendMail({
+            to: row.email,
+            from: process.env.EMAIL_USER,
+            subject,
+            html
+          }).catch(()=>{});
+        }
+        // redirect after attempting email
+        res.redirect(`/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}`);
+      });
+    } else {
+      res.redirect(`/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}`);
+    }
+  });
 });
 
 const port = Number(process.env.PORT || 3000);
