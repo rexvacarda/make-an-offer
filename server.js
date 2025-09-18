@@ -10,6 +10,7 @@ const nodemailer = require("nodemailer");
 require("dotenv").config();
 
 const app = express();
+app.set('trust proxy', 1); // behind Render/Cloudflare
 app.use(express.json());
 app.use(helmet({ crossOriginResourcePolicy: false }));
 
@@ -98,7 +99,7 @@ const M = {
       `<p><b>${t}</b> へのご提案ありがとうございます。現時点では承認できませんでした。別の価格で再度ご提案ください。</p>`
   },
 
-  // The following translations are concise & natural; they all fallback to EN if anything is missing
+  // (Other languages unchanged for brevity—your previous list remains)
   de: {
     receivedSubject: t => `Angebot erhalten – ${t}`,
     receivedText: (a,t)=>`Danke! Ihr Angebot über ${a} für „${t}“ ist eingegangen. Wir melden uns bald.`,
@@ -113,7 +114,6 @@ const M = {
     declinedSubject: t => `Update zum Angebot – ${t}`,
     declinedHtml: t => `<p>Danke für Ihr Angebot zu <b>${t}</b>. Aktuell können wir es nicht annehmen. Gern können Sie einen neuen Vorschlag senden.</p>`
   },
-
   nl: {
     receivedSubject: t => `Aanbod ontvangen – ${t}`,
     receivedText: (a,t)=>`Bedankt! Uw bod van ${a} voor “${t}” is ontvangen. We nemen spoedig contact op.`,
@@ -128,7 +128,6 @@ const M = {
     declinedSubject: t => `Update bod – ${t}`,
     declinedHtml: t => `<p>Bedankt voor uw bod op <b>${t}</b>. We kunnen dit bedrag nu niet accepteren. U mag een aangepast bod sturen.</p>`
   },
-
   ko: {
     receivedSubject: t => `제안을 접수했습니다 – ${t}`,
     receivedText: (a,t)=>`감사합니다. “${t}”에 대한 제안가 ${a} 가 접수되었습니다. 곧 연락드리겠습니다.`,
@@ -143,7 +142,6 @@ const M = {
     declinedSubject: t => `제안 안내 – ${t}`,
     declinedHtml: t => `<p><b>${t}</b>에 대한 제안 감사드립니다. 현재 가격으로는 승인하기 어렵습니다. 다른 가격으로 다시 제안해 주세요.</p>`
   },
-
   he: {
     receivedSubject: t => `הצעתך התקבלה – ${t}`,
     receivedText: (a,t)=>`תודה! ההצעה שלך על סך ${a} עבור „${t}” התקבלה. נחזור אליך בקרוב.`,
@@ -158,7 +156,6 @@ const M = {
     declinedSubject: t => `עדכון לגבי ההצעה – ${t}`,
     declinedHtml: t => `<p>תודה על ההצעה ל-<b>${t}</b>. בשלב זה לא נוכל לאשר. נשמח להצעה מעודכנת.</p>`
   },
-
   cs: {
     receivedSubject: t => `Nabídka přijata – ${t}`,
     receivedText: (a,t)=>`Děkujeme! Vaši nabídku ${a} na „${t}” jsme přijali. Brzy se ozveme.`,
@@ -173,7 +170,6 @@ const M = {
     declinedSubject: t => `Aktualizace nabídky – ${t}`,
     declinedHtml: t => `<p>Děkujeme za nabídku na <b>${t}</b>. V tuto chvíli ji nemůžeme přijmout. Pošlete prosím upravenou nabídku.</p>`
   },
-
   pl: {
     receivedSubject: t => `Otrzymaliśmy Twoją ofertę – ${t}`,
     receivedText: (a,t)=>`Dziękujemy! Twoja oferta ${a} dla „${t}” została przyjęta. Wkrótce się odezwiemy.`,
@@ -188,7 +184,6 @@ const M = {
     declinedSubject: t => `Aktualizacja oferty – ${t}`,
     declinedHtml: t => `<p>Dziękujemy za ofertę na <b>${t}</b>. Obecnie nie możemy jej zaakceptować. Prosimy o nową propozycję ceny.</p>`
   },
-
   es: {
     receivedSubject: t => `Hemos recibido tu oferta – ${t}`,
     receivedText: (a,t)=>`¡Gracias! Hemos recibido tu oferta de ${a} por “${t}”. Te contactaremos pronto.`,
@@ -203,7 +198,6 @@ const M = {
     declinedSubject: t => `Actualización de oferta – ${t}`,
     declinedHtml: t => `<p>Gracias por tu oferta por <b>${t}</b>. No podemos aceptarla por ahora. Envía otra propuesta si quieres.</p>`
   },
-
   it: {
     receivedSubject: t => `Offerta ricevuta – ${t}`,
     receivedText: (a,t)=>`Grazie! La tua offerta di ${a} per “${t}” è stata ricevuta. Ti contatteremo presto.`,
@@ -218,7 +212,6 @@ const M = {
     declinedSubject: t => `Aggiornamento offerta – ${t}`,
     declinedHtml: t => `<p>Grazie per la tua offerta su <b>${t}</b>. Al momento non possiamo accettarla. Inviaci pure una nuova proposta.</p>`
   },
-
   nb: {
     receivedSubject: t => `Tilbud mottatt – ${t}`,
     receivedText: (a,t)=>`Takk! Vi har mottatt tilbudet ditt på ${a} for «${t}». Vi tar kontakt snart.`,
@@ -233,7 +226,6 @@ const M = {
     declinedSubject: t => `Oppdatering om tilbud – ${t}`,
     declinedHtml: t => `<p>Takk for tilbudet på <b>${t}</b>. Vi kan ikke godta det nå. Send gjerne et nytt tilbud.</p>`
   },
-
   da: {
     receivedSubject: t => `Tilbud modtaget – ${t}`,
     receivedText: (a,t)=>`Tak! Vi har modtaget dit tilbud på ${a} for “${t}”. Vi vender tilbage snarest.`,
@@ -248,7 +240,6 @@ const M = {
     declinedSubject: t => `Opdatering om tilbud – ${t}`,
     declinedHtml: t => `<p>Tak for dit tilbud på <b>${t}</b>. Vi kan ikke acceptere det lige nu. Send gerne et nyt.</p>`
   },
-
   el: {
     receivedSubject: t => `Λάβαμε την προσφορά σας – ${t}`,
     receivedText: (a,t)=>`Ευχαριστούμε! Λάβαμε την προσφορά σας ${a} για «${t}». Θα επικοινωνήσουμε σύντομα.`,
@@ -263,7 +254,6 @@ const M = {
     declinedSubject: t => `Ενημέρωση προσφοράς – ${t}`,
     declinedHtml: t => `<p>Ευχαριστούμε για την προσφορά στο <b>${t}</b>. Δεν μπορούμε να την αποδεχτούμε αυτή τη στιγμή. Μπορείτε να προτείνετε νέο ποσό.</p>`
   },
-
   fr: {
     receivedSubject: t => `Offre reçue – ${t}`,
     receivedText: (a,t)=>`Merci ! Nous avons bien reçu votre offre de ${a} pour « ${t} ». Nous revenons vers vous rapidement.`,
@@ -278,7 +268,6 @@ const M = {
     declinedSubject: t => `Mise à jour de l’offre – ${t}`,
     declinedHtml: t => `<p>Merci pour votre offre concernant <b>${t}</b>. Nous ne pouvons pas l’accepter pour le moment. N’hésitez pas à nous proposer un autre montant.</p>`
   },
-
   "pt-pt": {
     receivedSubject: t => `Recebemos a sua proposta – ${t}`,
     receivedText: (a,t)=>`Obrigado! Recebemos a sua proposta de ${a} para “${t}”. Entraremos em contacto em breve.`,
@@ -293,7 +282,6 @@ const M = {
     declinedSubject: t => `Atualização da proposta – ${t}`,
     declinedHtml: t => `<p>Obrigado pela sua proposta para <b>${t}</b>. De momento não a podemos aceitar. Envie-nos outra proposta, se desejar.</p>`
   },
-
   sl: {
     receivedSubject: t => `Ponudba prejeta – ${t}`,
     receivedText: (a,t)=>`Hvala! Vašo ponudbo ${a} za »${t}« smo prejeli. Kmalu vas kontaktiramo.`,
@@ -308,7 +296,6 @@ const M = {
     declinedSubject: t => `Posodobitev ponudbe – ${t}`,
     declinedHtml: t => `<p>Hvala za ponudbo za <b>${t}</b>. Trenutno je ne moremo sprejeti. Pošljite nam novo ponudbo, če želite.</p>`
   },
-
   hu: {
     receivedSubject: t => `Ajánlat megérkezett – ${t}`,
     receivedText: (a,t)=>`Köszönjük! Megkaptuk a(z) ${a} összegű ajánlatát a „${t}” termékre. Hamarosan jelentkezünk.`,
@@ -323,7 +310,6 @@ const M = {
     declinedSubject: t => `Ajánlat frissítése – ${t}`,
     declinedHtml: t => `<p>Köszönjük az ajánlatot a <b>${t}</b> termékre. Jelenleg nem tudjuk elfogadni. Küldjön nyugodtan új ajánlatot.</p>`
   },
-
   fi: {
     receivedSubject: t => `Tarjous vastaanotettu – ${t}`,
     receivedText: (a,t)=>`Kiitos! Vastaanotimme tarjouksesi ${a} tuotteesta ”${t}”. Otamme pian yhteyttä.`,
@@ -338,7 +324,6 @@ const M = {
     declinedSubject: t => `Tarjouksen päivitys – ${t}`,
     declinedHtml: t => `<p>Kiitos tarjouksestasi tuotteesta <b>${t}</b>. Emme voi hyväksyä sitä tällä hetkellä. Voit lähettää uuden ehdotuksen.</p>`
   },
-
   sv: {
     receivedSubject: t => `Erbjudande mottaget – ${t}`,
     receivedText: (a,t)=>`Tack! Vi har mottagit ditt erbjudande på ${a} för ”${t}”. Vi återkommer snart.`,
@@ -369,7 +354,7 @@ db.serialize(() => {
     variant_id TEXT, variant_title TEXT,
     currency TEXT, price_cents INTEGER, offer_cents INTEGER,
     email TEXT, email_norm TEXT, note TEXT,
-    lang TEXT,                                    -- NEW
+    lang TEXT,
     status TEXT DEFAULT 'open',
     discount_code TEXT,
     price_rule_id TEXT,
@@ -619,8 +604,23 @@ app.get("/", (req, res) => {
   <p>Admin: <a href="/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">/admin/offers</a></p>`);
 });
 
-// --- Rate limit ---
-const postLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
+// --- Rate limit (proxy-safe) ---
+const getClientIp = (req) => {
+  const h = String(
+    req.headers['cf-connecting-ip'] ||
+    req.headers['x-forwarded-for'] ||
+    req.ip || ''
+  );
+  return h.split(',')[0].trim();
+};
+
+const postLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIp,
+});
 
 // --- Create offer ---
 app.post("/api/offer", postLimiter, (req, res) => {
@@ -629,7 +629,7 @@ app.post("/api/offer", postLimiter, (req, res) => {
   if (allow.length && !allow.includes(origin)) return res.status(403).json({ ok: false, error: "Forbidden origin" });
 
   const email = String(o.email || "").trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ ok: false, error: "Invalid email" });
+  if (!/^[^\s@]+@[^\s@]{1,}\.[^\s@]{2,}$/.test(email)) return res.status(400).json({ ok: false, error: "Invalid email" });
 
   const product_id = String(o.product_id || "");
   const variant_id = String(o.variant_id || "");
@@ -651,8 +651,8 @@ app.post("/api/offer", postLimiter, (req, res) => {
     email,
     email_norm: email.toLowerCase(),
     note: String(o.note || "").slice(0, 2000),
-    lang: String(o.lang || "").toLowerCase(),        // NEW
-    ip: String(req.headers["cf-connecting-ip"] || req.ip || ""),
+    lang: String(o.lang || "").toLowerCase(),
+    ip: getClientIp(req),
     ua: String(req.headers["user-agent"] || "")
   };
 
