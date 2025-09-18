@@ -7,7 +7,7 @@ const cors = require("cors");
 const rateLimit = require("express-rate-limit");
 const sqlite3 = require("sqlite3").verbose();
 const nodemailer = require("nodemailer");
-require("dotenv").config(); // env first
+require("dotenv").config();
 
 const app = express();
 app.use(express.json());
@@ -37,14 +37,18 @@ db.serialize(() => {
     discount_code TEXT,
     price_rule_id TEXT,
     discount_expires_at DATETIME,
+    draft_order_id TEXT,
+    drafted_at DATETIME,
     ip TEXT, ua TEXT
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_offers_created ON offers(created_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_offers_email_variant ON offers(email_norm,variant_id)`);
-  // idempotent "migrations" for existing DBs
+  // idempotent columns
   db.run(`ALTER TABLE offers ADD COLUMN discount_code TEXT`, () => {});
   db.run(`ALTER TABLE offers ADD COLUMN price_rule_id TEXT`, () => {});
   db.run(`ALTER TABLE offers ADD COLUMN discount_expires_at DATETIME`, () => {});
+  db.run(`ALTER TABLE offers ADD COLUMN draft_order_id TEXT`, () => {});
+  db.run(`ALTER TABLE offers ADD COLUMN drafted_at DATETIME`, () => {});
 });
 
 // --- Mailer (optional) ---
@@ -53,22 +57,17 @@ if (process.env.SMTP_HOST) {
   mailer = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
-    secure: String(process.env.SMTP_SECURE || "false") === "true", // 465 => true
+    secure: String(process.env.SMTP_SECURE || "false") === "true",
     auth: process.env.EMAIL_USER ? { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS } : undefined
   });
 }
 
-// ---- Shopify helpers (REST Admin) ----
-const SHOP = process.env.SHOPIFY_SHOP; // e.g. yourstore.myshopify.com
-const API_V = process.env.SHOPIFY_API_VERSION || "2024-07";
-const ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN; // "shpat_..."
+// ---- Shopify helpers ----
+const SHOP = process.env.SHOPIFY_SHOP; // yourstore.myshopify.com
+const API_V = process.env.SHOPIFY_API_VERSION || "2025-07";
+const ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 
-function getNumericId(maybeId) {
-  // works for "12345" or "gid://shopify/ProductVariant/12345"
-  const m = String(maybeId || "").match(/\d+$/);
-  return m ? Number(m[0]) : NaN;
-}
-
+// REST
 async function shopifyFetch(pathname, method = "GET", body = null) {
   if (!SHOP || !ADMIN_TOKEN) throw new Error("Shopify admin not configured");
   const url = `https://${SHOP}/admin/api/${API_V}${pathname}`;
@@ -83,17 +82,54 @@ async function shopifyFetch(pathname, method = "GET", body = null) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    // Log full error so you can see missing scope / bad ID, etc.
-    console.error(`Shopify ${method} ${pathname} ${res.status}: ${text}`);
-    throw new Error(`Shopify ${res.status}`);
+    console.error(`Shopify REST ${method} ${pathname} ${res.status}: ${text}`);
+    throw new Error(`Shopify REST ${res.status}`);
   }
   return res.json();
 }
 
-/**
- * Create a single-use, fixed-amount discount code that applies to the accepted variant.
- * Discount amount = (regular price - offered price). Stores code/price_rule/expiry back to DB.
- */
+// GraphQL
+async function shopifyGraphQL(query, variables) {
+  if (!SHOP || !ADMIN_TOKEN) throw new Error("Shopify admin not configured");
+  const url = `https://${SHOP}/admin/api/${API_V}/graphql.json`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "X-Shopify-Access-Token": ADMIN_TOKEN,
+      "Content-Type": "application/json",
+      "Accept": "application/json"
+    },
+    body: JSON.stringify({ query, variables })
+  });
+  const json = await res.json();
+  if (!res.ok || json.errors) {
+    console.error("Shopify GQL error:", JSON.stringify(json, null, 2));
+    throw new Error("Shopify GraphQL error");
+  }
+  return json.data;
+}
+
+// --- Market mapping (domain -> currency & country) ---
+const MARKET_MAP = (() => {
+  try { return JSON.parse(process.env.MARKET_MAP_JSON || "[]"); } catch { return []; }
+})();
+function resolveMarketForHost(host) {
+  const h = String(host || "").toLowerCase();
+  const found = MARKET_MAP.find(m => m.host.toLowerCase() === h);
+  if (found) return { currency: found.currency, country: found.country };
+  // naive fallback by TLD
+  if (h.endsWith(".jp")) return { currency: "JPY", country: "JP" };
+  if (h.endsWith(".co.uk") || h.endsWith(".uk") || h.endsWith(".com")) return { currency: "GBP", country: "GB" };
+  return { currency: "GBP", country: "GB" };
+}
+
+function getNumericId(maybeId) {
+  const m = String(maybeId || "").match(/\d+$/);
+  return m ? Number(m[0]) : NaN;
+}
+const toGID = (type, id) => `gid://shopify/${type}/${id}`;
+
+/** Create code (global, shop currency) for single accepted item */
 async function createDiscountForOffer(row) {
   if (!row.price_cents || !row.offer_cents) throw new Error("Missing price/offer");
   const diffCents = Math.max(0, row.price_cents - row.offer_cents);
@@ -102,25 +138,24 @@ async function createDiscountForOffer(row) {
   const variantNumericId = getNumericId(row.variant_id);
   if (!variantNumericId) throw new Error(`Bad variant_id: ${row.variant_id}`);
 
-  const valueFixed = `-${(diffCents / 100).toFixed(2)}`; // Shopify needs negative fixed_amount string
+  const valueFixed = `-${(diffCents / 100).toFixed(2)}`;
   const code = `OFFER-${row.id}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
   const startsAt = new Date().toISOString();
   const ttlDays = Number(process.env.DISCOUNT_TTL_DAYS || 7);
-  const endsAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
+  const endsAt = new Date(Date.now() + ttlDays * 864e5).toISOString();
 
-  // 1) Price rule entitled to the accepted variant; single use; once per customer.
   const prBody = {
     price_rule: {
       title: `Offer ${row.id} – ${row.product_title}`,
       target_type: "line_item",
       target_selection: "entitled",
-      allocation_method: "each", // applies per eligible unit
+      allocation_method: "each",
       value_type: "fixed_amount",
-      value: valueFixed,         // e.g. "-10.00"
+      value: valueFixed,
       customer_selection: "all",
       starts_at: startsAt,
       ends_at: endsAt,
-      usage_limit: 1,            // single use total
+      usage_limit: 1,
       once_per_customer: true,
       entitled_variant_ids: [ variantNumericId ]
     }
@@ -130,13 +165,11 @@ async function createDiscountForOffer(row) {
   const priceRuleId = pr?.price_rule?.id;
   if (!priceRuleId) throw new Error("No price_rule.id returned");
 
-  // 2) Discount code under that price rule
   const dc = await shopifyFetch(`/price_rules/${priceRuleId}/discount_codes.json`, "POST", {
     discount_code: { code }
   });
   const createdCode = dc?.discount_code?.code || code;
 
-  // Save to DB
   await new Promise((resolve, reject) => {
     db.run(
       "UPDATE offers SET discount_code=?, price_rule_id=?, discount_expires_at=? WHERE id=?",
@@ -146,6 +179,102 @@ async function createDiscountForOffer(row) {
   });
 
   return { code: createdCode, priceRuleId, endsAt };
+}
+
+/** NEW: Create a draft order priced in the customer's market currency */
+async function createDraftForEmailAndShop(emailNorm, shopDomain) {
+  // Collect accepted offers for this email+domain that aren't drafted yet
+  const rows = await new Promise((resolve, reject) => {
+    db.all(
+      `SELECT * FROM offers
+       WHERE email_norm=? AND shop_domain=? AND status='accepted'
+         AND (draft_order_id IS NULL OR draft_order_id='')
+       ORDER BY created_at ASC`,
+      [emailNorm, shopDomain],
+      (err, rs) => err ? reject(err) : resolve(rs || [])
+    );
+  });
+  if (!rows.length) throw new Error("No accepted offers to draft");
+
+  const { currency: presentmentCurrency, country } = resolveMarketForHost(shopDomain);
+  const email = rows[0].email;
+
+  // Build GIDs + price overrides in presentment currency
+  const line_items = [];
+  const ids = [];
+  for (const r of rows) {
+    const numeric = getNumericId(r.variant_id);
+    if (!numeric) { console.error("Skip bad variant_id:", r.variant_id); continue; }
+    line_items.push({
+      variantId: toGID("ProductVariant", numeric),
+      quantity: 1,
+      // IMPORTANT: priceOverride expects presentment currency
+      priceOverride: {
+        amount: (r.offer_cents / 100).toFixed(2),
+        currencyCode: presentmentCurrency
+      },
+      customAttributes: [{ key: "OfferID", value: String(r.id) }]
+    });
+    ids.push(r.id);
+  }
+  if (!line_items.length) throw new Error("No valid line items from offers");
+
+  // GraphQL draftOrderCreate with presentmentCurrencyCode
+  const mutation = `
+    mutation CreateDraft($input: DraftOrderInput!) {
+      draftOrderCreate(input: $input) {
+        draftOrder { id invoiceUrl presentmentCurrencyCode }
+        userErrors { field message }
+      }
+    }
+  `;
+  const input = {
+    email,
+    lineItems: line_items,
+    presentmentCurrencyCode: presentmentCurrency, // key bit for Markets
+    note: `Offers: ${ids.join(", ")} (market ${country}/${presentmentCurrency})`,
+    tags: ["make-offer"]
+  };
+
+  const data = await shopifyGraphQL(mutation, { input });
+  const payload = data?.draftOrderCreate;
+  const gqlId = payload?.draftOrder?.id;
+  if (!gqlId) {
+    const errs = (payload?.userErrors || []).map(e => e.message).join("; ");
+    throw new Error(`Draft create failed: ${errs || "no id"}`);
+  }
+
+  // store marker
+  await new Promise((resolve, reject) => {
+    const placeholders = ids.map(() => "?").join(",");
+    db.run(
+      `UPDATE offers SET draft_order_id=?, drafted_at=CURRENT_TIMESTAMP WHERE id IN (${placeholders})`,
+      [String(gqlId), ...ids],
+      (err) => err ? reject(err) : resolve()
+    );
+  });
+
+  // Send invoice via GraphQL (Shopify emails the customer)
+  try {
+    const send = `
+      mutation SendInvoice($id: ID!, $to: String!, $subject: String, $msg: String) {
+        draftOrderInvoiceSend(id: $id, to: $to, subject: $subject, customMessage: $msg) {
+          draftOrder { id invoiceUrl }
+          userErrors { field message }
+        }
+      }
+    `;
+    await shopifyGraphQL(send, {
+      id: gqlId,
+      to: email,
+      subject: "Your offer checkout",
+      msg: "We’ve bundled the items you offered on. Complete checkout when ready."
+    });
+  } catch (e) {
+    console.error("send_invoice failed:", e.message);
+  }
+
+  return { draftId: gqlId, count: ids.length, email, presentmentCurrency };
 }
 
 // --- Health + root page ---
@@ -159,10 +288,10 @@ app.get("/", (req, res) => {
   <p>Admin: <a href="/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">/admin/offers</a></p>`);
 });
 
-// --- Rate limit: many products allowed; block bursts per IP ---
+// --- Rate limit ---
 const postLimiter = rateLimit({ windowMs: 10 * 60 * 1000, max: 20, standardHeaders: true, legacyHeaders: false });
 
-// --- Create offer (dedupe only same email+variant within 24h) ---
+// --- Create offer ---
 app.post("/api/offer", postLimiter, (req, res) => {
   const o = req.body || {};
   const origin = req.headers.origin || "";
@@ -213,7 +342,6 @@ app.post("/api/offer", postLimiter, (req, res) => {
         function(insertErr){
           if (insertErr) return res.status(500).json({ ok: false, error: "Insert failed" });
 
-          // notify admin + auto-reply (best-effort)
           if (mailer && process.env.OFFER_TO_EMAIL) {
             const fmt = n => (n/100).toFixed(2);
             const subject = `New offer: ${row.currency} ${fmt(row.offer_cents)} – ${row.product_title} (${row.variant_title})`;
@@ -244,26 +372,35 @@ app.post("/api/offer", postLimiter, (req, res) => {
   );
 });
 
-// --- Minimal admin (table) ---
+// --- Admin table ---
 app.get("/admin/offers", (req, res) => {
   if (req.query.key !== process.env.OFFER_ADMIN_KEY) return res.status(403).send("Forbidden");
   db.all("SELECT * FROM offers ORDER BY created_at DESC LIMIT 500", [], (err, rows) => {
     if (err) return res.status(500).send("DB error");
     const esc = s => String(s||"").replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m]));
-    const tr = r => `<tr>
-      <td>${r.id}</td><td>${r.created_at}</td>
-      <td>${esc(r.product_title)}<br><small>${esc(r.variant_title)}</small></td>
-      <td>${r.currency} ${(r.price_cents/100).toFixed(2)}</td>
-      <td><b>${r.currency} ${(r.offer_cents/100).toFixed(2)}</b></td>
-      <td>${esc(r.email)}</td>
-      <td>${r.status}${r.discount_code ? `<br><small>Code: ${esc(r.discount_code)}</small>` : ""}</td>
-      <td>
-        <a href="/admin/offers/${r.id}/status?value=accepted&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Accept</a> ·
-        <a href="/admin/offers/${r.id}/status?value=declined&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Decline</a> ·
-        <a href="/admin/offers/${r.id}/status?value=open&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Reopen</a>
-        ${r.discount_code ? `<br><a href="https://${esc(r.shop_domain)}/discount/${encodeURIComponent(r.discount_code)}?redirect=%2Fcart%2F${encodeURIComponent(getNumericId(r.variant_id))}%3A1" target="_blank">Open with item</a>`
-                          : `<br><a href="/admin/offers/${r.id}/create-code?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Create code</a>`}
-      </td></tr>`;
+    const tr = r => {
+      const vid = getNumericId(r.variant_id);
+      const codeLink = r.discount_code
+        ? `<br><a href="https://${esc(r.shop_domain)}/discount/${encodeURIComponent(r.discount_code)}?redirect=%2Fcart%2Fadd%3Fid%3D${encodeURIComponent(vid)}%26quantity%3D1%26return_to%3D%252Fcart" target="_blank">Open with item</a>`
+        : `<br><a href="/admin/offers/${r.id}/create-code?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Create code</a>`;
+      const draftLink = (r.status === 'accepted')
+        ? `<br><a href="/admin/offers/${r.id}/draft?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Draft for this email</a>`
+        : "";
+      return `<tr>
+        <td>${r.id}</td><td>${r.created_at}</td>
+        <td>${esc(r.product_title)}<br><small>${esc(r.variant_title)}</small></td>
+        <td>${r.currency} ${(r.price_cents/100).toFixed(2)}</td>
+        <td><b>${r.currency} ${(r.offer_cents/100).toFixed(2)}</b></td>
+        <td>${esc(r.email)}</td>
+        <td>${r.status}${r.discount_code ? `<br><small>Code: ${esc(r.discount_code)}</small>` : ""}${r.draft_order_id ? `<br><small>Draft: ${esc(r.draft_order_id)}</small>` : ""}</td>
+        <td>
+          <a href="/admin/offers/${r.id}/status?value=accepted&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Accept</a> ·
+          <a href="/admin/offers/${r.id}/status?value=declined&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Decline</a> ·
+          <a href="/admin/offers/${r.id}/status?value=open&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Reopen</a>
+          ${codeLink}
+          ${draftLink}
+        </td></tr>`;
+    };
     res.send(`<!doctype html><meta charset="utf-8"><title>Offers</title>
       <style>body{font:14px system-ui;margin:20px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px}th{background:#f6f6f6}</style>
       <h2>Offers</h2>
@@ -272,7 +409,7 @@ app.get("/admin/offers", (req, res) => {
   });
 });
 
-// --- Helper route: create code (manual retry) ---
+// --- Manual retry: create code ---
 app.get("/admin/offers/:id/create-code", (req, res) => {
   if (req.query.key !== process.env.OFFER_ADMIN_KEY) return res.status(403).send("Forbidden");
   const id = Number(req.params.id || 0);
@@ -288,7 +425,31 @@ app.get("/admin/offers/:id/create-code", (req, res) => {
   });
 });
 
-// --- Accept/Decline with discount creation + email on Accept ---
+// --- NEW: Create draft for this email (bundles multiple accepted offers) ---
+app.get("/admin/offers/:id/draft", (req, res) => {
+  if (req.query.key !== process.env.OFFER_ADMIN_KEY) return res.status(403).send("Forbidden");
+  const id = Number(req.params.id || 0);
+  db.get("SELECT * FROM offers WHERE id=?", [id], async (err, row) => {
+    if (err || !row) return res.status(404).send("Offer not found");
+    try {
+      await createDraftForEmailAndShop(row.email_norm, row.shop_domain);
+      if (mailer && row.email) {
+        await mailer.sendMail({
+          to: row.email,
+          from: process.env.EMAIL_USER,
+          subject: "Your offers are ready to checkout",
+          html: `<p>We’ve created a checkout for your accepted items in your local currency. A Shopify invoice has been emailed to you.</p>`
+        }).catch(()=>{});
+      }
+    } catch (e) {
+      console.error("Draft order creation failed:", e.message);
+    } finally {
+      res.redirect(`/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}`);
+    }
+  });
+});
+
+// --- Accept/Decline (creates code on Accept + emails customer) ---
 app.get("/admin/offers/:id/status", (req, res) => {
   if (req.query.key !== process.env.OFFER_ADMIN_KEY) return res.status(403).send("Forbidden");
   const id = Number(req.params.id || 0);
@@ -298,11 +459,9 @@ app.get("/admin/offers/:id/status", (req, res) => {
   db.get("SELECT * FROM offers WHERE id=?", [id], async (err, row) => {
     if (err || !row) return res.status(404).send("Offer not found");
 
-    // Update status first
     db.run("UPDATE offers SET status=? WHERE id=?", [val, id], async (uerr) => {
       if (uerr) return res.status(500).send("DB error");
 
-      // On Accept: create a code (if not already) and email customer links
       if (val === "accepted") {
         let codeInfo = null;
         try {
@@ -322,7 +481,8 @@ app.get("/admin/offers/:id/status", (req, res) => {
             const host = row.shop_domain || "smelltoimpress.com";
             const variantId = getNumericId(row.variant_id);
 
-            const withItem = `https://${host}/discount/${encodeURIComponent(code)}?redirect=%2Fcart%2F${encodeURIComponent(variantId)}%3A1`;
+            const addPath   = `/cart/add?id=${encodeURIComponent(variantId)}&quantity=1&return_to=%2Fcart`;
+            const withItem  = `https://${host}/discount/${encodeURIComponent(code)}?redirect=${encodeURIComponent(addPath)}`;
             const applyOnly = `https://${host}/discount/${encodeURIComponent(code)}?redirect=%2Fcart`;
 
             const subject = `Offer accepted – ${row.product_title}`;
@@ -334,7 +494,7 @@ app.get("/admin/offers/:id/status", (req, res) => {
                 <li><a href="${withItem}">Add the item and apply the code</a></li>
                 <li><a href="${applyOnly}">Apply the code and go to your cart</a> (you can add other items)</li>
               </ul>
-              <p>If the link doesn’t open, copy the code above and enter it at checkout.</p>
+              <p>Tip: if you have multiple accepted offers, reply to this email and we’ll send a combined checkout.</p>
             `;
             await mailer.sendMail({ to: row.email, from: process.env.EMAIL_USER, subject, html });
           } catch (e) {
@@ -343,7 +503,6 @@ app.get("/admin/offers/:id/status", (req, res) => {
         }
       }
 
-      // On Decline: courtesy email
       if (val === "declined" && mailer && row.email) {
         try {
           await mailer.sendMail({
