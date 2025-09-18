@@ -34,14 +34,14 @@ db.serialize(() => {
     currency TEXT, price_cents INTEGER, offer_cents INTEGER,
     email TEXT, email_norm TEXT, note TEXT,
     status TEXT DEFAULT 'open',     -- open|accepted|declined|expired
-    discount_code TEXT,             -- NEW
-    price_rule_id TEXT,             -- NEW
-    discount_expires_at DATETIME,   -- NEW
+    discount_code TEXT,
+    price_rule_id TEXT,
+    discount_expires_at DATETIME,
     ip TEXT, ua TEXT
   )`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_offers_created ON offers(created_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_offers_email_variant ON offers(email_norm,variant_id)`);
-  // idempotent "migrations" for pre-existing DBs
+  // idempotent "migrations" for existing DBs
   db.run(`ALTER TABLE offers ADD COLUMN discount_code TEXT`, () => {});
   db.run(`ALTER TABLE offers ADD COLUMN price_rule_id TEXT`, () => {});
   db.run(`ALTER TABLE offers ADD COLUMN discount_expires_at DATETIME`, () => {});
@@ -63,6 +63,12 @@ const SHOP = process.env.SHOPIFY_SHOP; // e.g. yourstore.myshopify.com
 const API_V = process.env.SHOPIFY_API_VERSION || "2024-07";
 const ADMIN_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN; // "shpat_..."
 
+function getNumericId(maybeId) {
+  // works for "12345" or "gid://shopify/ProductVariant/12345"
+  const m = String(maybeId || "").match(/\d+$/);
+  return m ? Number(m[0]) : NaN;
+}
+
 async function shopifyFetch(pathname, method = "GET", body = null) {
   if (!SHOP || !ADMIN_TOKEN) throw new Error("Shopify admin not configured");
   const url = `https://${SHOP}/admin/api/${API_V}${pathname}`;
@@ -77,20 +83,24 @@ async function shopifyFetch(pathname, method = "GET", body = null) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Shopify ${method} ${pathname} ${res.status}: ${text}`);
+    // Log full error so you can see missing scope / bad ID, etc.
+    console.error(`Shopify ${method} ${pathname} ${res.status}: ${text}`);
+    throw new Error(`Shopify ${res.status}`);
   }
   return res.json();
 }
 
 /**
  * Create a single-use, fixed-amount discount code that applies to the accepted variant.
- * Discount amount = (regular price - offered price).
- * Stores code/price_rule/expiry back to DB.
+ * Discount amount = (regular price - offered price). Stores code/price_rule/expiry back to DB.
  */
 async function createDiscountForOffer(row) {
   if (!row.price_cents || !row.offer_cents) throw new Error("Missing price/offer");
   const diffCents = Math.max(0, row.price_cents - row.offer_cents);
   if (diffCents <= 0) throw new Error("Offer >= price; no discount needed");
+
+  const variantNumericId = getNumericId(row.variant_id);
+  if (!variantNumericId) throw new Error(`Bad variant_id: ${row.variant_id}`);
 
   const valueFixed = `-${(diffCents / 100).toFixed(2)}`; // Shopify needs negative fixed_amount string
   const code = `OFFER-${row.id}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
@@ -112,7 +122,7 @@ async function createDiscountForOffer(row) {
       ends_at: endsAt,
       usage_limit: 1,            // single use total
       once_per_customer: true,
-      entitled_variant_ids: [ Number(row.variant_id) ]
+      entitled_variant_ids: [ variantNumericId ]
     }
   };
 
@@ -138,7 +148,7 @@ async function createDiscountForOffer(row) {
   return { code: createdCode, priceRuleId, endsAt };
 }
 
-// --- Health + (optional) root page ---
+// --- Health + root page ---
 app.get("/health", (_, res) => res.json({ ok: true }));
 app.get("/", (req, res) => {
   res.send(`<!doctype html><meta charset="utf-8">
@@ -251,13 +261,30 @@ app.get("/admin/offers", (req, res) => {
         <a href="/admin/offers/${r.id}/status?value=accepted&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Accept</a> ·
         <a href="/admin/offers/${r.id}/status?value=declined&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Decline</a> ·
         <a href="/admin/offers/${r.id}/status?value=open&key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Reopen</a>
-        ${r.discount_code ? `<br><a href="https://${esc(r.shop_domain)}/discount/${encodeURIComponent(r.discount_code)}?redirect=%2Fcart%2F${encodeURIComponent(r.variant_id)}%3A1" target="_blank">Open with item</a>` : ""}
+        ${r.discount_code ? `<br><a href="https://${esc(r.shop_domain)}/discount/${encodeURIComponent(r.discount_code)}?redirect=%2Fcart%2F${encodeURIComponent(getNumericId(r.variant_id))}%3A1" target="_blank">Open with item</a>`
+                          : `<br><a href="/admin/offers/${r.id}/create-code?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}">Create code</a>`}
       </td></tr>`;
     res.send(`<!doctype html><meta charset="utf-8"><title>Offers</title>
       <style>body{font:14px system-ui;margin:20px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:6px}th{background:#f6f6f6}</style>
       <h2>Offers</h2>
       <table><tr><th>ID</th><th>Time</th><th>Product</th><th>Price</th><th>Offer</th><th>Email</th><th>Status</th><th>Action</th></tr>
       ${rows.map(tr).join("")}</table>`);
+  });
+});
+
+// --- Helper route: create code (manual retry) ---
+app.get("/admin/offers/:id/create-code", (req, res) => {
+  if (req.query.key !== process.env.OFFER_ADMIN_KEY) return res.status(403).send("Forbidden");
+  const id = Number(req.params.id || 0);
+  db.get("SELECT * FROM offers WHERE id=?", [id], async (err, row) => {
+    if (err || !row) return res.status(404).send("Offer not found");
+    try {
+      if (!row.discount_code) await createDiscountForOffer(row);
+    } catch (e) {
+      console.error("Manual discount creation failed:", e.message);
+    } finally {
+      res.redirect(`/admin/offers?key=${encodeURIComponent(process.env.OFFER_ADMIN_KEY)}`);
+    }
   });
 });
 
@@ -293,7 +320,7 @@ app.get("/admin/offers/:id/status", (req, res) => {
             const fmt = n => (n/100).toFixed(2);
             const code = codeInfo?.code || "(contact us)";
             const host = row.shop_domain || "smelltoimpress.com";
-            const variantId = row.variant_id;
+            const variantId = getNumericId(row.variant_id);
 
             const withItem = `https://${host}/discount/${encodeURIComponent(code)}?redirect=%2Fcart%2F${encodeURIComponent(variantId)}%3A1`;
             const applyOnly = `https://${host}/discount/${encodeURIComponent(code)}?redirect=%2Fcart`;
@@ -301,7 +328,7 @@ app.get("/admin/offers/:id/status", (req, res) => {
             const subject = `Offer accepted – ${row.product_title}`;
             const html = `
               <p>Great news — we’ve accepted your offer of <b>${row.currency} ${fmt(row.offer_cents)}</b> for <b>${row.product_title}</b> (${row.variant_title}).</p>
-              <p>Your single-use discount code${codeInfo?.endsAt ? ` (valid until <b>${new Date(codeInfo.endsAt).toLocaleDateString()})</b>` : ""}:</p>
+              <p>Your single-use discount code${codeInfo?.endsAt ? ` (valid until <b>${new Date(codeInfo.endsAt).toLocaleDateString()}</b>)` : ""}:</p>
               <p style="font-size:18px"><b>${code}</b></p>
               <ul>
                 <li><a href="${withItem}">Add the item and apply the code</a></li>
