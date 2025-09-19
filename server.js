@@ -28,7 +28,7 @@ function pickLang(code) {
   const short = base.split("-")[0]; // e.g. "pt" from "pt-PT"
   const supported = [
     "en","ja","de","nl","ko","he","cs","pl","es","it","nb","da","el",
-    "fr","pt-pt","sl","hu","fi","sv"
+    "fr","pt-pt","sl","hu","fi","sv","zh-cn"
   ];
   if (supported.includes(base)) return base;
   if (supported.includes(short)) return short === "pt" ? "pt-pt" : short;
