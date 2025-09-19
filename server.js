@@ -114,6 +114,25 @@ const M = {
     declinedSubject: t => `Update zum Angebot – ${t}`,
     declinedHtml: t => `<p>Danke für Ihr Angebot zu <b>${t}</b>. Aktuell können wir es nicht annehmen. Gern können Sie einen neuen Vorschlag senden.</p>`
   },
+  "zh-cn": {
+  receivedSubject: t => `已收到您的出价 – ${t}`,
+  receivedText: (a, t) => `谢谢！我们已收到您对“${t}”的出价 ${a}。我们会尽快与您联系。`,
+
+  acceptedSubject: t => `出价已接受 – ${t}`,
+  acceptedHtml: p => `
+    <p>好消息——我们已接受您对 <b>${p.title}</b>${p.variantTitle ? `（${p.variantTitle}）` : ""} 的 <b>${p.amount}</b> 出价。</p>
+    <p>一次性优惠码${p.endsAt ? `（有效期至 <b>${p.endsAt}</b>）` : ""}：</p>
+    <p style="font-size:18px"><b>${p.code}</b></p>
+    <ul>
+      <li><a href="${p.withItem}">将商品加入购物车并应用优惠码</a></li>
+      <li><a href="${p.applyOnly}">仅应用优惠码并前往购物车</a></li>
+    </ul>
+    <p>如果链接无法打开，请在结账时手动输入该优惠码。</p>`,
+
+  declinedSubject: t => `出价更新 – ${t}`,
+  declinedHtml: t =>
+    `<p>感谢您对 <b>${t}</b> 的出价。目前我们无法接受该金额。如需调整价格，欢迎再次出价。</p>`
+  },
   nl: {
     receivedSubject: t => `Aanbod ontvangen – ${t}`,
     receivedText: (a,t)=>`Bedankt! Uw bod van ${a} voor “${t}” is ontvangen. We nemen spoedig contact op.`,
